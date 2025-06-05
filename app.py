@@ -224,7 +224,7 @@ def create_mindmap_markdown(text):
         
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt.format(text=text)}],
-            model="llama3-8b-8192"
+            model="gemma2-9b-it"
         )
             
         return response.choices[0].message.content.strip()
@@ -530,7 +530,7 @@ def get_qa_chain():
     Question: \n{question}\n
     Answer:
     """
-    model = ChatGroq(model="llama3-8b-8192", groq_api_key=GROQ_API_KEY)
+    model = ChatGroq(model="gemma2-9b-it", groq_api_key=GROQ_API_KEY)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
@@ -555,7 +555,7 @@ def get_additional_info(query):
         
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": enhanced_prompt}],
-            model="llama3-8b-8192"  # Using the same model as your QA chain
+            model="gemma2-9b-it"  # Using the same model as your QA chain
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -593,7 +593,7 @@ def user_ip(user_question, persona):
         """
 
         prompt = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
-        model = ChatGroq(model="llama3-8b-8192", groq_api_key=GROQ_API_KEY)
+        model = ChatGroq(model="gemma2-9b-it", groq_api_key=GROQ_API_KEY)
         chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
         response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
