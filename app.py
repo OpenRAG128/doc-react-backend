@@ -892,7 +892,10 @@ def generate_concepts():
             'error': str(e)
         }), 500
 
-
+@app.route("/")
+def ping():
+    return "Backend is running"
+    
 # Replace the index route with this fixed version:
 @app.route('/api/query', methods=['POST'])
 def android_query():
