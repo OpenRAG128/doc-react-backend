@@ -36,10 +36,12 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_LEFT
+from flask_cors import CORS
 
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+CORS(app) 
 app.secret_key = os.getenv('FLASK_SECRET_KEY', "6fK9P6WcfpBz7bWJ9qV2eP2Qv5dA8D8z")
 
 load_dotenv()
