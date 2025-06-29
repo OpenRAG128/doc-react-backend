@@ -8,6 +8,7 @@ beautifulsoup4
 markdown
 reportlab
 langchain>=0.1.14
+youtube-transcript-api
 langchain-community
 langchain-huggingface
 langchain-groq
