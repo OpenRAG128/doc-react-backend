@@ -5,7 +5,6 @@ PyPDF2
 python-docx
 requests
 beautifulsoup4
-youtube-transcript-api
 markdown
 reportlab
 langchain>=0.1.14
