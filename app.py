@@ -40,6 +40,7 @@ import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO)
 
+
 app = Flask(__name__)
 CORS(app) 
 app.secret_key = os.getenv('FLASK_SECRET_KEY', "6fK9P6WcfpBz7bWJ9qV2eP2Qv5dA8D8z")
@@ -939,4 +940,5 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
