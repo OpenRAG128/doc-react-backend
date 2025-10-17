@@ -1,3 +1,6 @@
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+
 Flask
 flask-limiter
 python-dotenv
@@ -22,3 +25,4 @@ lxml
 pydantic==1.10.13
 flask-cors
 langchain-google-genai
+google-generativeai
