@@ -11,7 +11,6 @@ langchain>=0.1.14
 youtube-transcript-api
 langchain-community
 langchain-huggingface
-langchain-groq
 sentence-transformers
 faiss-cpu
 gunicorn
@@ -21,5 +20,5 @@ rarfile
 patool
 lxml
 pydantic==1.10.13
-groq
 flask-cors
+langchain-google-genai
