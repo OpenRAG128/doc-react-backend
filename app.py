@@ -223,12 +223,9 @@ def create_mindmap_markdown(text):
         Respond only with the markdown mindmap, no additional text.
         """
         
-        response = model.chat.completions.create(
-            messages=[{"role": "user", "content": prompt.format(text=text)}],
-            model="gemma2-9b-it"
-        )
+        response = model.generate_content(prompt.format(text=text))
             
-        return response.choices[0].message.content.strip()
+        return response.text.strip()
     except Exception as e:
         logging.error(f"Error generating mindmap: {str(e)}")
         return None
@@ -940,5 +937,6 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
