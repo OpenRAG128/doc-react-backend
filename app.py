@@ -4,7 +4,6 @@ from PyPDF2 import PdfReader
 from docx import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
@@ -28,7 +27,6 @@ import patoolib  # For RAR support
 import shutil 
 import re
 from werkzeug.utils import secure_filename
-from groq import Groq
 import markdown
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -37,6 +35,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_LEFT
 from flask_cors import CORS
+from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO)
 
@@ -45,8 +45,8 @@ CORS(app)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', "6fK9P6WcfpBz7bWJ9qV2eP2Qv5dA8D8z")
 
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-print(GROQ_API_KEY)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=GOOGLE_API_KEY)
 
 
 # Configuration constants
@@ -195,9 +195,9 @@ def create_mindmap_pdf(markdown_content, output_path):
     return output_path
 
 def create_mindmap_markdown(text):
-    """Generate mindmap markdown using Groq AI."""
+    """Generate mindmap markdown using Gemini AI."""
     try:
-        client = Groq(api_key=GROQ_API_KEY)
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = """
         Create a hierarchical markdown mindmap from the following text. 
@@ -222,7 +222,7 @@ def create_mindmap_markdown(text):
         Respond only with the markdown mindmap, no additional text.
         """
         
-        response = client.chat.completions.create(
+        response = model.chat.completions.create(
             messages=[{"role": "user", "content": prompt.format(text=text)}],
             model="gemma2-9b-it"
         )
@@ -530,14 +530,14 @@ def get_qa_chain():
     Question: \n{question}\n
     Answer:
     """
-    model = ChatGroq(model="gemma2-9b-it", groq_api_key=GROQ_API_KEY)
+    model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY, temperature=0.3)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
 def get_additional_info(query):
-    """Get additional information from Groq for the query"""
+    """Get additional information from Gemini for the query"""
     try:
-        client = Groq(api_key=GROQ_API_KEY)
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Craft a prompt that encourages complementary information
         enhanced_prompt = f"""
@@ -553,11 +553,8 @@ def get_additional_info(query):
         """
 
         
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": enhanced_prompt}],
-            model="gemma2-9b-it"  # Using the same model as your QA chain
-        )
-        return response.choices[0].message.content
+        response = model.generate_content(enhanced_prompt)
+        return response.text
     except Exception as e:
         logging.error(f"Error getting additional information: {e}")
         return None
@@ -593,9 +590,10 @@ def user_ip(user_question, persona):
         """
 
         prompt = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
-        model = ChatGroq(model="gemma2-9b-it", groq_api_key=GROQ_API_KEY)
+        model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY,
+                                     temperature=0.3)
         chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-
+        
         response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
         additional_info = get_additional_info(user_question)
 
@@ -941,3 +939,4 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
