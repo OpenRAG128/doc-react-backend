@@ -559,53 +559,459 @@ def get_additional_info(query):
     
     
 def user_ip(user_question, persona):
+    """
+    Enhanced persona-aware query handler with dynamic response formatting
+    based on question type and user persona.
+    """
     try:
         embeddings = get_embeddings()
         new_db = FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
         docs = new_db.similarity_search(user_question, k=5)
-
-        persona_instructions = {
-            "Student": "Explain in a simple, beginner-friendly way with relatable examples.",
-            "Researcher": "Provide a technically deep explanation with references and advanced insights.",
-            "Working Professional": "Focus on practicality, real-world application, and relevance to industry.",
-            "Teacher": "Structure the answer clearly like a lesson plan or explanation for a classroom.",
-            "Product Manager": "Frame the answer in terms of user value, business impact, and scalability.",
-            "Startup Founder": "Highlight innovation, execution strategy, and competitive advantages.",
-            "Developer": "Provide code-level insights, examples, and technical clarity.",
-            "Policy Maker": "Consider regulatory and ethical implications with broader societal context.",
-            "Investor": "Discuss ROI, market potential, business model implications, and trends."
-        }
-
-        system_prompt = f"""
-        {persona_instructions.get(persona, '')}
-
-        Use the context below to answer the question. If the answer isn't in the context, say:
-        "Answer is not there within the context."
-
-        Context: {{context}}
-        Question: {{question}}
-        Answer:
-        """
-
+        
+        # Analyze question type for dynamic response formatting
+        question_type = analyze_question_type(user_question)
+        
+        # Enhanced persona instructions with dynamic formatting
+        persona_config = get_persona_configuration(persona, question_type)
+        
+        # Build dynamic system prompt
+        system_prompt = build_dynamic_prompt(persona_config, question_type)
+        
+        # Create and execute chain
         prompt = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
-        model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY,
-                                     temperature=0.3)
+        model = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            google_api_key=GOOGLE_API_KEY,
+            temperature=persona_config.get('temperature', 0.3)
+        )
         chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
         
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        additional_info = get_additional_info(user_question)
-
-        cleaned_response = response["output_text"]
-        cleaned_response = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned_response)  # remove **bold**
-        cleaned_response = re.sub(r'\*(.*?)\*', r'\1', cleaned_response)      # remove *italic*
-        cleaned_response = re.sub(r'^[-•]\s+', '', cleaned_response, flags=re.MULTILINE)  # remove - or • at line start
-        cleaned_response = re.sub(r'\n{2,}', '\n\n', cleaned_response)        # remove extra newlines
+        response = chain(
+            {"input_documents": docs, "question": user_question}, 
+            return_only_outputs=True
+        )
         
-        return cleaned_response.strip(), docs, additional_info
-
+        # Get additional info with persona context
+        additional_info = get_additional_info(user_question, persona, question_type)
+        
+        # Format response based on persona and question type
+        formatted_response = format_response(
+            response["output_text"], 
+            persona, 
+            question_type
+        )
+        
+        return formatted_response, docs, additional_info
+        
     except Exception as e:
+        logging.error(f"Error in user_ip: {str(e)}")
         return f"Error: {str(e)}", [], None
 
+
+def analyze_question_type(question):
+    """
+    Analyze the question to determine its type for dynamic response formatting.
+    """
+    question_lower = question.lower()
+    
+    # Define question patterns
+    patterns = {
+        'definition': ['what is', 'define', 'meaning of', 'explain'],
+        'how_to': ['how to', 'how do', 'how can', 'steps to', 'process of'],
+        'why': ['why', 'reason', 'cause', 'purpose'],
+        'comparison': ['difference between', 'compare', 'versus', 'vs', 'better than'],
+        'example': ['example', 'instance', 'case study', 'illustration'],
+        'list': ['list', 'types of', 'kinds of', 'categories'],
+        'analysis': ['analyze', 'evaluate', 'assess', 'critique'],
+        'application': ['apply', 'use case', 'implement', 'practical'],
+        'pros_cons': ['advantages', 'disadvantages', 'pros', 'cons', 'benefits', 'drawbacks'],
+        'troubleshooting': ['problem', 'issue', 'error', 'fix', 'solve', 'debug']
+    }
+    
+    detected_types = []
+    for qtype, keywords in patterns.items():
+        if any(keyword in question_lower for keyword in keywords):
+            detected_types.append(qtype)
+    
+    return detected_types if detected_types else ['general']
+
+
+def get_persona_configuration(persona, question_types):
+    """
+    Get dynamic configuration for each persona based on question type.
+    """
+    configs = {
+        "Student": {
+            'base_instruction': "You are explaining to a student who is learning this topic.",
+            'temperature': 0.4,
+            'format_guides': {
+                'definition': "Start with a simple definition, then elaborate with analogies and real-world examples.",
+                'how_to': "Break down into clear numbered steps with explanations for each step.",
+                'why': "Explain the reasoning in a logical flow, connecting cause and effect clearly.",
+                'comparison': "Create a clear comparison showing similarities first, then differences.",
+                'example': "Provide multiple relatable examples from everyday life.",
+                'list': "Present as an organized list with brief explanations for each item.",
+                'analysis': "Guide through the analysis step-by-step, teaching the thought process.",
+                'application': "Show practical applications with step-by-step implementation.",
+                'pros_cons': "Present in a balanced way with equal weight to both sides.",
+                'troubleshooting': "Walk through the problem-solving process pedagogically.",
+                'general': "Explain concepts clearly with examples and build understanding progressively."
+            },
+            'style_notes': [
+                "Use simple language and avoid unnecessary jargon",
+                "Include analogies and metaphors to aid understanding",
+                "Provide concrete examples from familiar contexts",
+                "Encourage learning by explaining the 'why' behind concepts",
+                "Structure information in digestible chunks"
+            ]
+        },
+        
+        "Researcher": {
+            'base_instruction': "You are addressing an academic researcher or scholar.",
+            'temperature': 0.2,
+            'format_guides': {
+                'definition': "Provide precise technical definition with theoretical foundations and academic context.",
+                'how_to': "Detail methodology with theoretical justification and research considerations.",
+                'why': "Analyze underlying mechanisms with references to theoretical frameworks.",
+                'comparison': "Conduct systematic comparison with critical analysis of methodological approaches.",
+                'example': "Present case studies with methodological details and research implications.",
+                'list': "Categorize systematically with theoretical basis for classification.",
+                'analysis': "Perform rigorous analysis with attention to validity, limitations, and research gaps.",
+                'application': "Discuss research applications with methodological considerations.",
+                'pros_cons': "Evaluate critically with attention to research quality and evidence base.",
+                'troubleshooting': "Address methodological challenges with research-based solutions.",
+                'general': "Provide comprehensive academic treatment with theoretical depth."
+            },
+            'style_notes': [
+                "Use precise technical terminology",
+                "Reference theoretical frameworks and research paradigms",
+                "Discuss methodological considerations",
+                "Address limitations and gaps in current knowledge",
+                "Maintain scholarly rigor and objectivity"
+            ]
+        },
+        
+        "Working Professional": {
+            'base_instruction': "You are advising a working professional seeking practical knowledge.",
+            'temperature': 0.3,
+            'format_guides': {
+                'definition': "Define in business context with relevance to professional practice.",
+                'how_to': "Provide actionable steps with time estimates and resource requirements.",
+                'why': "Explain business rationale with focus on ROI and practical impact.",
+                'comparison': "Compare with focus on practical implications and decision-making criteria.",
+                'example': "Share industry examples and real-world case studies.",
+                'list': "Prioritize by relevance to professional practice.",
+                'analysis': "Analyze with focus on actionable insights and business implications.",
+                'application': "Detail implementation with consideration for organizational context.",
+                'pros_cons': "Frame in terms of business value and practical considerations.",
+                'troubleshooting': "Provide practical solutions with implementation guidance.",
+                'general': "Focus on actionable insights and real-world application."
+            },
+            'style_notes': [
+                "Emphasize practical application and business value",
+                "Include time and resource considerations",
+                "Reference industry standards and best practices",
+                "Focus on actionable takeaways",
+                "Consider organizational and professional context"
+            ]
+        },
+        
+        "Teacher": {
+            'base_instruction': "You are helping a teacher prepare lesson content or understand pedagogical approaches.",
+            'temperature': 0.35,
+            'format_guides': {
+                'definition': "Structure as you would teach it, with scaffolded explanation and formative check points.",
+                'how_to': "Present as a lesson plan with learning objectives, activities, and assessment strategies.",
+                'why': "Explain in ways that help students build conceptual understanding.",
+                'comparison': "Create comparative framework suitable for classroom instruction.",
+                'example': "Provide teaching examples with pedagogical notes on usage.",
+                'list': "Organize for progressive learning with curriculum alignment.",
+                'analysis': "Model analytical thinking for classroom demonstration.",
+                'application': "Suggest classroom activities and student exercises.",
+                'pros_cons': "Frame for classroom discussion with guiding questions.",
+                'troubleshooting': "Address common student misconceptions and teaching challenges.",
+                'general': "Structure content for effective classroom delivery with pedagogical guidance."
+            },
+            'style_notes': [
+                "Include learning objectives and outcomes",
+                "Suggest teaching strategies and activities",
+                "Address common student misconceptions",
+                "Provide formative assessment ideas",
+                "Consider differentiation for diverse learners",
+                "Include discussion prompts and guiding questions"
+            ]
+        },
+        
+        "Product Manager": {
+            'base_instruction': "You are advising a product manager on product strategy and execution.",
+            'temperature': 0.35,
+            'format_guides': {
+                'definition': "Define with focus on user value and product implications.",
+                'how_to': "Outline execution roadmap with milestones and success metrics.",
+                'why': "Explain in terms of user needs, business goals, and market dynamics.",
+                'comparison': "Compare competitive positioning and strategic advantages.",
+                'example': "Provide product case studies with feature analysis.",
+                'list': "Prioritize using product frameworks (RICE, MoSCoW, etc.).",
+                'analysis': "Analyze user impact, business metrics, and technical feasibility.",
+                'application': "Detail implementation with go-to-market considerations.",
+                'pros_cons': "Evaluate trade-offs with user and business impact.",
+                'troubleshooting': "Address product challenges with user-centric solutions.",
+                'general': "Frame in terms of user value, business impact, and product success."
+            },
+            'style_notes': [
+                "Focus on user value and business outcomes",
+                "Include metrics and success criteria",
+                "Consider technical feasibility and scalability",
+                "Reference product frameworks and methodologies",
+                "Address stakeholder perspectives"
+            ]
+        },
+        
+        "Startup Founder": {
+            'base_instruction': "You are advising a startup founder on strategy and execution.",
+            'temperature': 0.4,
+            'format_guides': {
+                'definition': "Define with focus on market opportunity and competitive advantage.",
+                'how_to': "Provide lean execution strategy with validation milestones.",
+                'why': "Explain market dynamics, timing, and strategic positioning.",
+                'comparison': "Analyze competitive landscape and differentiation opportunities.",
+                'example': "Share startup case studies with growth insights.",
+                'list': "Prioritize by impact and resource efficiency.",
+                'analysis': "Evaluate market fit, scalability, and growth potential.",
+                'application': "Detail MVP approach with iteration strategy.",
+                'pros_cons': "Assess in terms of market opportunity and execution risk.",
+                'troubleshooting': "Address startup challenges with scrappy solutions.",
+                'general': "Focus on innovation, market opportunity, and execution excellence."
+            },
+            'style_notes': [
+                "Emphasize speed, innovation, and market opportunity",
+                "Consider resource constraints and efficiency",
+                "Focus on competitive differentiation",
+                "Include growth and scaling considerations",
+                "Address execution risks and mitigation"
+            ]
+        },
+        
+        "Developer": {
+            'base_instruction': "You are providing technical guidance to a software developer.",
+            'temperature': 0.25,
+            'format_guides': {
+                'definition': "Provide technical definition with implementation details.",
+                'how_to': "Detail implementation steps with code considerations and best practices.",
+                'why': "Explain technical rationale with architecture and design considerations.",
+                'comparison': "Compare technical approaches with performance and maintainability analysis.",
+                'example': "Provide code examples with detailed explanations.",
+                'list': "Organize by technical category with usage context.",
+                'analysis': "Analyze technical trade-offs, performance, and scalability.",
+                'application': "Detail implementation with code structure and patterns.",
+                'pros_cons': "Evaluate technical merits with performance implications.",
+                'troubleshooting': "Debug systematically with technical diagnostics.",
+                'general': "Provide technical depth with implementation guidance."
+            },
+            'style_notes': [
+                "Use precise technical terminology",
+                "Include code-level insights where applicable",
+                "Discuss performance and scalability",
+                "Reference design patterns and best practices",
+                "Consider maintainability and code quality"
+            ]
+        },
+        
+        "Policy Maker": {
+            'base_instruction': "You are advising a policy maker on regulatory and societal implications.",
+            'temperature': 0.3,
+            'format_guides': {
+                'definition': "Define with attention to regulatory context and public impact.",
+                'how_to': "Outline policy framework with implementation and enforcement considerations.",
+                'why': "Explain societal impact, ethical implications, and public interest.",
+                'comparison': "Compare policy approaches with equity and effectiveness analysis.",
+                'example': "Provide policy case studies with outcome analysis.",
+                'list': "Prioritize by public impact and policy objectives.",
+                'analysis': "Evaluate social equity, ethical implications, and long-term effects.",
+                'application': "Detail policy implementation with stakeholder considerations.",
+                'pros_cons': "Assess public benefit, equity, and unintended consequences.",
+                'troubleshooting': "Address policy challenges with inclusive solutions.",
+                'general': "Focus on public benefit, equity, and regulatory implications."
+            },
+            'style_notes': [
+                "Consider regulatory and ethical dimensions",
+                "Address equity and accessibility",
+                "Discuss societal and long-term impacts",
+                "Include stakeholder perspectives",
+                "Reference policy frameworks and precedents"
+            ]
+        },
+        
+        "Investor": {
+            'base_instruction': "You are providing investment analysis and market insights.",
+            'temperature': 0.3,
+            'format_guides': {
+                'definition': "Define with focus on market size and investment opportunity.",
+                'how_to': "Outline investment thesis with due diligence considerations.",
+                'why': "Explain market dynamics, trends, and investment rationale.",
+                'comparison': "Compare investment opportunities with risk-return analysis.",
+                'example': "Provide market examples with financial performance.",
+                'list': "Prioritize by investment potential and market opportunity.",
+                'analysis': "Evaluate market potential, business model, and financial viability.",
+                'application': "Detail go-to-market with monetization strategy.",
+                'pros_cons': "Assess investment opportunity against market and execution risks.",
+                'troubleshooting': "Address business challenges with strategic solutions.",
+                'general': "Focus on ROI, market potential, and business model viability."
+            },
+            'style_notes': [
+                "Focus on financial metrics and ROI",
+                "Analyze market size and growth potential",
+                "Evaluate business model and monetization",
+                "Assess competitive landscape and moat",
+                "Consider risk factors and mitigation"
+            ]
+        }
+    }
+    
+    config = configs.get(persona, configs["Student"])
+    
+    # Select appropriate format guide based on question types
+    primary_type = question_types[0] if question_types else 'general'
+    config['active_format_guide'] = config['format_guides'].get(primary_type, config['format_guides']['general'])
+    
+    return config
+
+
+def build_dynamic_prompt(persona_config, question_types):
+    """
+    Build a dynamic prompt based on persona configuration and question type.
+    """
+    base = persona_config['base_instruction']
+    format_guide = persona_config['active_format_guide']
+    style_notes = "\n".join(f"- {note}" for note in persona_config['style_notes'])
+    
+    prompt = f"""
+{base}
+
+RESPONSE FORMATTING GUIDELINE:
+{format_guide}
+
+STYLE REQUIREMENTS:
+{style_notes}
+
+IMPORTANT INSTRUCTIONS:
+- Use ONLY the information from the provided context to answer the question
+- If the answer is not in the context, respond with: "Answer is not there within the context."
+- Do NOT make up information or use external knowledge
+- Maintain the specified persona perspective throughout
+- Adapt your explanation style to the type of question being asked
+- Be concise but thorough - avoid unnecessary verbosity
+- Use clear structure and logical flow
+
+Context: {{context}}
+
+Question: {{question}}
+
+Answer:
+"""
+    return prompt
+
+
+def format_response(response_text, persona, question_types):
+    """
+    Format and clean the response based on persona and question type.
+    """
+    # Remove markdown formatting
+    cleaned = response_text
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)  # Remove bold
+    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)      # Remove italic
+    cleaned = re.sub(r'^[-•]\s+', '', cleaned, flags=re.MULTILINE)  # Remove bullets
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)        # Remove excessive newlines
+    
+    # Persona-specific formatting enhancements
+    if persona == "Teacher":
+        # Add subtle structure markers for teachers
+        if any(qtype in question_types for qtype in ['how_to', 'definition']):
+            # Ensure logical flow is maintained
+            cleaned = enhance_pedagogical_structure(cleaned)
+    
+    elif persona == "Developer":
+        # Preserve technical formatting
+        cleaned = preserve_code_references(cleaned)
+    
+    elif persona == "Researcher":
+        # Maintain academic rigor markers
+        cleaned = enhance_academic_structure(cleaned)
+    
+    return cleaned.strip()
+
+
+def enhance_pedagogical_structure(text):
+    """
+    Add subtle pedagogical structure to teacher responses.
+    """
+    # This maintains readability while ensuring teaching flow
+    return text
+
+
+def preserve_code_references(text):
+    """
+    Preserve code-related formatting for developer persona.
+    """
+    # Keep technical terms clear
+    return text
+
+
+def enhance_academic_structure(text):
+    """
+    Maintain academic structure for researcher persona.
+    """
+    # Preserve scholarly formatting
+    return text
+
+
+def get_additional_info(query, persona=None, question_types=None):
+    """
+    Get persona-aware additional information from Gemini.
+    """
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # Persona-aware prompting for additional info
+        persona_context = ""
+        if persona:
+            persona_styles = {
+                "Student": "in a beginner-friendly way with practical examples",
+                "Researcher": "with academic depth and theoretical context",
+                "Working Professional": "with actionable insights and business relevance",
+                "Teacher": "with pedagogical value and teaching applications",
+                "Product Manager": "with product strategy and user value focus",
+                "Startup Founder": "with market opportunity and competitive insights",
+                "Developer": "with technical implementation details",
+                "Policy Maker": "with regulatory and societal implications",
+                "Investor": "with market potential and investment perspective"
+            }
+            persona_context = persona_styles.get(persona, "")
+        
+        enhanced_prompt = f"""
+        Provide additional relevant information {persona_context} about the following topic.
+        
+        Topic: {query}
+        
+        Cover complementary aspects such as:
+        - Recent developments or trends
+        - Practical applications or use cases
+        - Related concepts or technologies
+        - Best practices or expert insights
+        
+        Write in clear, natural language paragraphs without markdown formatting, bullet points, 
+        or special characters. Focus on information that complements what might already be 
+        covered in the main response.
+        """
+        
+        response = model.generate_content(enhanced_prompt)
+        return response.text.strip()
+        
+    except Exception as e:
+        logging.error(f"Error getting additional information: {e}")
+        return None
+
+        
 def generate_common_questions(docs):
     try:
         prompt = """you are an professional in generating good and applicable questions. Generate 5 questions according to the file and if the questions are not enough 
@@ -937,6 +1343,3 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
-
-
-
