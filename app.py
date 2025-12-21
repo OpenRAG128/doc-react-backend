@@ -37,6 +37,8 @@ from reportlab.lib.enums import TA_LEFT
 from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI
 import google.generativeai as genai
+import uuid
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -44,6 +46,14 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app) 
 app.secret_key = os.getenv('FLASK_SECRET_KEY', "6fK9P6WcfpBz7bWJ9qV2eP2Qv5dA8D8z")
+
+user_sessions = {}
+@app.before_request
+def ensure_session_id():
+    """Assign a unique ID to every new visitor to track their specific data."""
+    if 'user_id' not in session:
+        session['user_id'] = str(uuid.uuid4())
+
 
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -311,41 +321,6 @@ def process_compressed_file(file_path, temp_dir):
     
     return extracted_text
 
-@app.route('/get_additional_info', methods=['POST'])
-def get_additional_info_route():
-    try:
-        if not os.path.exists("faiss_index"):
-            return jsonify({
-                'success': False,
-                'error': 'No documents have been uploaded yet'
-            }), 400
-
-        embeddings = get_embeddings()
-        new_db = FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
-        docs = new_db.similarity_search("", k=5)  # Get representative documents
-        
-        # Get a summary of the document content
-        context = "\n".join(doc.page_content for doc in docs)
-        additional_info = get_additional_info(context)
-        
-        if additional_info:
-            return jsonify({
-                'success': True,
-                'additional_info': additional_info
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Could not generate additional information'
-            }), 400
-            
-    except Exception as e:
-        logging.error(f"Error getting additional information: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -501,22 +476,25 @@ def get_chunks(text):
 
 def get_vector_store(text_chunks):
     try:
-        # Create the directory if it doesn't exist
-        os.makedirs("faiss_index", exist_ok=True)
-        
-        embeddings = get_embeddings()
-        vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-        vector_store.save_local("faiss_index")
-        
-        # Verify the index was created successfully
-        if not os.path.exists("faiss_index/index.faiss"):
-            logging.error("Failed to create FAISS index file")
+        user_id = session.get('user_id')
+        if not user_id:
+            logging.error("No user_id found in session")
             return False
+
+        embeddings = get_embeddings()
+        
+        # Create the index in memory
+        vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+        
+        # === SAVE TO RAM (User Dictionary) ===
+        user_sessions[user_id] = vector_store
+        
+        logging.info(f"Vector store successfully created in memory for user {user_id}")
         return True
     except Exception as e:
         logging.error(f"Error creating vector store: {e}")
         return False
-
+        
 
 @lru_cache(maxsize=1)
 def get_qa_chain():
@@ -564,8 +542,18 @@ def user_ip(user_question, persona):
     based on question type and user persona.
     """
     try:
-        embeddings = get_embeddings()
-        new_db = FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
+        # 1. Get the current User ID from the session
+        user_id = session.get('user_id')
+        
+        # 2. Check if this user has data in memory (RAM)
+        # We NO LONGER check for a file on disk ("faiss_index")
+        if not user_id or user_id not in user_sessions:
+            return "Please upload documents or process URLs first.", [], None
+
+        # 3. Retrieve the FAISS index directly from the global dictionary
+        new_db = user_sessions[user_id]
+        
+        # 4. Perform search using the in-memory database
         docs = new_db.similarity_search(user_question, k=5)
         
         # Analyze question type for dynamic response formatting
@@ -606,7 +594,7 @@ def user_ip(user_question, persona):
     except Exception as e:
         logging.error(f"Error in user_ip: {str(e)}")
         return f"Error: {str(e)}", [], None
-
+        
 
 def analyze_question_type(question):
     """
@@ -1055,19 +1043,6 @@ def generate_key_concepts(docs):
         logging.error(f"Error generating concepts: {e}")
         return []
 
-def verify_faiss_index():
-    """Verify that the FAISS index exists and is valid"""
-    if not os.path.exists("faiss_index/index.faiss"):
-        return False
-    try:
-        embeddings = get_embeddings()
-        FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
-        return True
-    except Exception as e:
-        logging.error(f"Error verifying FAISS index: {e}")
-        return False
-
-
 
 @lru_cache(maxsize=10)
 def get_video_recommendations(query):
@@ -1140,17 +1115,17 @@ def process_urls():
                 failed_urls.append({'url': url, 'reason': str(e)})
         
         if all_text.strip():
-            # Create the directory if it doesn't exist
-            os.makedirs("faiss_index", exist_ok=True)
-            
+            # Create text chunks
             text_chunks = get_chunks(all_text)
-            get_vector_store(text_chunks)
             
-            # Verify the index was created successfully
-            if not os.path.exists("faiss_index/index.faiss"):
+            # Save to Memory (RAM) via user_sessions
+            success = get_vector_store(text_chunks)
+            
+            # Check boolean success instead of file existence
+            if not success:
                 return jsonify({
                     'success': False,
-                    'error': 'Failed to create vector index',
+                    'error': 'Failed to create memory index',
                     'details': {
                         'processed_urls': processed_urls,
                         'failed_urls': failed_urls
@@ -1185,6 +1160,7 @@ def process_urls():
                 'message': str(e)
             }
         }), 500
+
 
 @app.route("/api/generate", methods=["POST"])
 def generate_mindmap_api():
@@ -1230,26 +1206,47 @@ def download_pdf_api():
 
 @app.route('/start_over', methods=['POST'])
 def start_over():
+    # 1. Identify the user before clearing the session
+    user_id = session.get('user_id')
+    
+    # 2. Clear RAM: Remove this user's data from the global memory
+    if user_id and user_id in user_sessions:
+        try:
+            del user_sessions[user_id]
+            logging.info(f"Cleared memory for user {user_id}")
+        except Exception as e:
+            logging.error(f"Error clearing memory for user {user_id}: {e}")
+            
+    # 3. Clear Browser Session (Cookies)
     session.clear()
+    
+    # 4. Clear Disk (Cleanup for any leftover files)
     if os.path.exists("faiss_index"):
         try:
             shutil.rmtree("faiss_index")
         except Exception as e:
             logging.error(f"Error removing faiss_index directory: {e}")
+            
     return redirect(url_for('index'))
-
+    
 
 @app.route('/generate_questions', methods=['POST'])
 def generate_questions():
     try:
-        if not os.path.exists("faiss_index/index.faiss"):
+        # 1. Get User ID from session
+        user_id = session.get('user_id')
+        
+        # 2. Check RAM (user_sessions) instead of Disk
+        if not user_id or user_id not in user_sessions:
             return jsonify({
                 'success': False,
                 'error': 'No documents have been uploaded yet'
             }), 400
 
-        embeddings = get_embeddings()
-        new_db = FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
+        # 3. Load Vector Store from RAM
+        new_db = user_sessions[user_id]
+        
+        # 4. Perform Search (No changes to logic below)
         docs = new_db.similarity_search("", k=3)  # Get representative documents
         
         questions = generate_common_questions(docs)
@@ -1270,14 +1267,20 @@ def generate_questions():
 @app.route('/generate_concepts', methods=['POST'])
 def generate_concepts():
     try:
-        if not os.path.exists("faiss_index/index.faiss"):
+        # 1. Get User ID from session
+        user_id = session.get('user_id')
+        
+        # 2. Check RAM (user_sessions) instead of Disk
+        if not user_id or user_id not in user_sessions:
             return jsonify({
                 'success': False,
                 'error': 'No documents have been uploaded yet'
             }), 400
 
-        embeddings = get_embeddings()
-        new_db = FAISS.load_local("faiss_index", embeddings=embeddings, allow_dangerous_deserialization=True)
+        # 3. Load Vector Store from RAM
+        new_db = user_sessions[user_id]
+        
+        # 4. Perform Search
         docs = new_db.similarity_search("", k=3)  # Get representative documents
         
         concepts = generate_key_concepts(docs)
@@ -1294,6 +1297,48 @@ def generate_concepts():
             'error': str(e)
         }), 500
 
+
+@app.route('/get_additional_info', methods=['POST'])
+def get_additional_info_route():
+    try:
+        # 1. Get User ID from session
+        user_id = session.get('user_id')
+        
+        # 2. Check RAM (user_sessions) instead of Disk
+        if not user_id or user_id not in user_sessions:
+            return jsonify({
+                'success': False,
+                'error': 'No documents have been uploaded yet'
+            }), 400
+
+        # 3. Load Vector Store from RAM
+        new_db = user_sessions[user_id]
+        
+        # 4. Perform Search
+        docs = new_db.similarity_search("", k=5)  # Get representative documents
+        
+        # Get a summary of the document content
+        context = "\n".join(doc.page_content for doc in docs)
+        additional_info = get_additional_info(context)
+        
+        if additional_info:
+            return jsonify({
+                'success': True,
+                'additional_info': additional_info
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Could not generate additional information'
+            }), 400
+            
+    except Exception as e:
+        logging.error(f"Error getting additional information: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+        
     
 # Replace the index route with this fixed version:
 @app.route('/api/query', methods=['POST'])
@@ -1343,3 +1388,4 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
