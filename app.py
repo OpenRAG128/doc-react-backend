@@ -368,38 +368,65 @@ def download_file(url):
 def process_url_file(url):
     """Enhanced URL file processing with multiple fallback methods"""
     try:
-        # First, try WebBaseLoader
-        loader = WebBaseLoader(url)
-        docs = loader.load()
-        text = "\n".join(doc.page_content for doc in docs)
+        logging.info(f"Starting to process URL: {url}")
+        text = ""
         
-        # If no text, try Selenium
-        if not text.strip():
+        # Method 1: Try WebBaseLoader first (fastest)
+        try:
+            logging.info(f"Attempting WebBaseLoader for {url}")
+            loader = WebBaseLoader(url)
+            docs = loader.load()
+            text = "\n".join(doc.page_content for doc in docs)
+            if text.strip():
+                logging.info(f"WebBaseLoader succeeded: extracted {len(text)} characters")
+                return text
+        except Exception as e:
+            logging.warning(f"WebBaseLoader failed for {url}: {str(e)}")
+        
+        # Method 2: Try direct download if it's a file URL
+        if any(ext in url.lower() for ext in ['.pdf', '.docx', '.zip', '.rar']):
+            try:
+                logging.info(f"Attempting direct file download for {url}")
+                file_type, content = download_file(url)
+                if content:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_file = os.path.join(temp_dir, f"temp.{file_type}")
+                        with open(temp_file, 'wb') as f:
+                            f.write(content)
+                        
+                        if file_type in ['zip', 'rar']:
+                            text = process_compressed_file(temp_file, temp_dir)
+                        elif file_type == 'pdf':
+                            with open(temp_file, 'rb') as f:
+                                text = get_pdf_text(f)
+                        elif file_type == 'docx':
+                            text = get_docx_text(temp_file)
+                        
+                        if text.strip():
+                            logging.info(f"Direct download succeeded: extracted {len(text)} characters")
+                            return text
+            except Exception as e:
+                logging.warning(f"Direct download failed for {url}: {str(e)}")
+        
+        # Method 3: Try Selenium as last resort (slowest, may fail in Azure)
+        try:
+            logging.info(f"Attempting SeleniumURLLoader for {url}")
             loader = SeleniumURLLoader(urls=[url])
             docs = loader.load()
             text = "\n".join(doc.page_content for doc in docs)
+            if text.strip():
+                logging.info(f"SeleniumURLLoader succeeded: extracted {len(text)} characters")
+                return text
+        except WebDriverException as e:
+            logging.error(f"Selenium WebDriver not available: {str(e)}")
+        except Exception as e:
+            logging.warning(f"SeleniumURLLoader failed for {url}: {str(e)}")
         
-        # If still no text, try direct download and file processing
-        if not text.strip():
-            file_type, content = download_file(url)
-            if content:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    temp_file = os.path.join(temp_dir, f"temp.{file_type}")
-                    with open(temp_file, 'wb') as f:
-                        f.write(content)
-                    
-                    if file_type in ['zip', 'rar']:
-                        text = process_compressed_file(temp_file, temp_dir)
-                    elif file_type == 'pdf':
-                        with open(temp_file, 'rb') as f:
-                            text = get_pdf_text(f)
-                    elif file_type == 'docx':
-                        text = get_docx_text(temp_file)
-        
-        return text or ""
+        logging.error(f"All methods failed to extract content from {url}")
+        return ""
         
     except Exception as e:
-        logging.error(f"Comprehensive URL processing error: {e}")
+        logging.error(f"Comprehensive URL processing error for {url}: {e}", exc_info=True)
         return ""
     
     
@@ -1109,19 +1136,22 @@ def process_urls():
                 if text.strip():
                     all_text += text + "\n"
                     processed_urls.append(url)
+                    logging.info(f"Successfully processed URL: {url} - extracted {len(text)} characters")
                 else:
                     failed_urls.append({'url': url, 'reason': 'No content extracted'})
+                    logging.warning(f"No content extracted from URL: {url}")
             except Exception as e:
                 failed_urls.append({'url': url, 'reason': str(e)})
+                logging.error(f"Failed to process URL {url}: {str(e)}")
         
         if all_text.strip():
             # Create text chunks
             text_chunks = get_chunks(all_text)
+            logging.info(f"Created {len(text_chunks)} text chunks from URLs")
             
             # Save to Memory (RAM) via user_sessions
             success = get_vector_store(text_chunks)
             
-            # Check boolean success instead of file existence
             if not success:
                 return jsonify({
                     'success': False,
@@ -1131,27 +1161,36 @@ def process_urls():
                         'failed_urls': failed_urls
                     }
                 }), 500
-                
+            
+            # *** CRITICAL FIX: Set session flags ***
+            session['urls_processed'] = True
             session['uploaded_urls'] = processed_urls
+            session['has_documents'] = True  # Add this flag
+            session.modified = True  # Ensure session is saved
+            
+            logging.info(f"Successfully processed {len(processed_urls)} URLs and created vector store")
+            
             return jsonify({
                 'success': True,
                 'processed_urls': processed_urls,
-                'failed_urls': failed_urls
+                'failed_urls': failed_urls,
+                'chunks_created': len(text_chunks),
+                'total_characters': len(all_text)
             })
         
         # Detailed error message if no content was extracted
         return jsonify({
             'success': False,
-            'error': 'Could not process URLs',
+            'error': 'Could not extract content from any URLs',
             'details': {
                 'failed_urls': failed_urls,
                 'attempted_urls': urls,
-                'message': 'No content could be extracted from the provided URLs'
+                'message': 'No content could be extracted from the provided URLs. This may be due to: 1) URLs requiring authentication, 2) JavaScript-heavy pages, 3) Anti-scraping protections'
             }
         }), 400
         
     except Exception as e:
-        logging.error(f"Error processing URLs: {e}")
+        logging.error(f"Error processing URLs: {e}", exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e),
@@ -1160,7 +1199,6 @@ def process_urls():
                 'message': str(e)
             }
         }), 500
-
 
 @app.route("/api/generate", methods=["POST"])
 def generate_mindmap_api():
@@ -1216,8 +1254,8 @@ def start_over():
             logging.info(f"Cleared memory for user {user_id}")
         except Exception as e:
             logging.error(f"Error clearing memory for user {user_id}: {e}")
-            
-    # 3. Clear Browser Session (Cookies)
+    
+    # 3. Clear Browser Session (Cookies) - including URL flags
     session.clear()
     
     # 4. Clear Disk (Cleanup for any leftover files)
@@ -1226,8 +1264,11 @@ def start_over():
             shutil.rmtree("faiss_index")
         except Exception as e:
             logging.error(f"Error removing faiss_index directory: {e}")
-            
-    return redirect(url_for('index'))
+    
+    # Recreate user_id for new session
+    session['user_id'] = str(uuid.uuid4())
+    
+    return jsonify({'success': True, 'message': 'Session cleared successfully'})
     
 
 @app.route('/generate_questions', methods=['POST'])
@@ -1352,6 +1393,7 @@ def android_query():
     persona = request.form.get('persona', 'Student')
     files = request.files.getlist('docs')
 
+    # Process uploaded files if present
     if files and any(file.filename for file in files):
         all_text = ""
         for file in files:
@@ -1370,8 +1412,24 @@ def android_query():
                     "recommendations": [],
                     "uploaded_filenames": uploaded_filenames
                 }), 500
+            # Set session flag for file upload
+            session['has_documents'] = True
+            session.modified = True
 
+    # *** CRITICAL FIX: Check if user has any documents (files OR URLs) ***
+    user_id = session.get('user_id')
+    has_documents = session.get('has_documents', False) or session.get('urls_processed', False)
+    
     if user_question:
+        # Verify documents exist before querying
+        if not user_id or user_id not in user_sessions:
+            return jsonify({
+                "response": "Please upload documents or process URLs first.",
+                "additional_info": None,
+                "recommendations": [],
+                "uploaded_filenames": uploaded_filenames
+            }), 400
+            
         response, docs, additional_info = user_ip(user_question, persona)
         if response and docs:
             context_text = " ".join(doc.page_content for doc in docs)
@@ -1388,4 +1446,5 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
