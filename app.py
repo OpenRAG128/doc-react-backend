@@ -38,16 +38,18 @@ from flask_cors import CORS
 from langchain_google_genai import ChatGoogleGenerativeAI
 import google.generativeai as genai
 import uuid
-
+import time
 
 logging.basicConfig(level=logging.INFO)
 
 
 app = Flask(__name__)
-CORS(app) 
+CORS(app, supports_credentials=True)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', "6fK9P6WcfpBz7bWJ9qV2eP2Qv5dA8D8z")
 
-user_sessions = {}
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = True
+
 @app.before_request
 def ensure_session_id():
     """Assign a unique ID to every new visitor to track their specific data."""
@@ -501,6 +503,62 @@ def get_chunks(text):
     )
     return text_splitter.split_text(text)
 
+def cleanup_old_sessions(max_age_seconds=3600): # Defaults to 1 hour
+    """
+    STORAGE SAVER: Deletes user folders that haven't been used in 1 hour.
+    This prevents your Azure B3 storage from filling up.
+    """
+    indexes_dir = "faiss_indexes"
+    if not os.path.exists(indexes_dir):
+        return
+    
+    current_time = time.time()
+    count = 0
+    
+    for user_id in os.listdir(indexes_dir):
+        user_folder = os.path.join(indexes_dir, user_id)
+        
+        # Skip if it's not a directory
+        if not os.path.isdir(user_folder):
+            continue
+            
+        try:
+            # Check when the folder was last modified/accessed
+            folder_time = os.path.getmtime(user_folder)
+            
+            # If older than limit, DELETE IT to save space
+            if current_time - folder_time > max_age_seconds:
+                shutil.rmtree(user_folder)
+                count += 1
+        except Exception as e:
+            logging.warning(f"Failed to cleanup session {user_id}: {e}")
+            
+    if count > 0:
+        logging.info(f"Storage Cleanup: Removed {count} expired user sessions.")
+
+def load_user_vector_store():
+    """Helper to safely load the vector store from disk."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return None
+    
+    folder_path = os.path.join("faiss_indexes", user_id)
+    
+    if not os.path.exists(folder_path):
+        return None
+        
+    try:
+        # STORAGE PROTECTION: 'Touch' the folder to update its timestamp.
+        # This tells the cleanup function "I am still here, don't delete me!"
+        os.utime(folder_path, None)
+        
+        embeddings = get_embeddings()
+        return FAISS.load_local(folder_path, embeddings, allow_dangerous_deserialization=True)
+    except Exception as e:
+        logging.error(f"Error loading vector store: {e}")
+        return None
+
+    
 def get_vector_store(text_chunks):
     try:
         user_id = session.get('user_id')
@@ -508,20 +566,26 @@ def get_vector_store(text_chunks):
             logging.error("No user_id found in session")
             return False
 
+        # 1. TRIGGER CLEANUP: Delete old files before creating new ones
+        cleanup_old_sessions()
+
         embeddings = get_embeddings()
-        
-        # Create the index in memory
         vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
         
-        # === SAVE TO RAM (User Dictionary) ===
-        user_sessions[user_id] = vector_store
+        # 2. SAVE TO DISK
+        folder_path = os.path.join("faiss_indexes", user_id)
         
-        logging.info(f"Vector store successfully created in memory for user {user_id}")
+        if os.path.exists(folder_path):
+            shutil.rmtree(folder_path)
+            
+        os.makedirs(folder_path)
+        vector_store.save_local(folder_path)
+        
+        logging.info(f"Vector store saved to disk: {folder_path}")
         return True
     except Exception as e:
         logging.error(f"Error creating vector store: {e}")
-        return False
-        
+        return False        
 
 @lru_cache(maxsize=1)
 def get_qa_chain():
@@ -538,34 +602,19 @@ def get_qa_chain():
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
     
 def user_ip(user_question, persona):
-    """
-    Enhanced persona-aware query handler with dynamic response formatting
-    based on question type and user persona.
-    """
     try:
-        # 1. Get the current User ID from the session
-        user_id = session.get('user_id')
+        # Load from Disk (this also updates the timestamp so data isn't deleted)
+        new_db = load_user_vector_store()
         
-        # 2. Check if this user has data in memory (RAM)
-        if not user_id or user_id not in user_sessions:
+        if not new_db:
             return "Please upload documents or process URLs first.", [], None
 
-        # 3. Retrieve the FAISS index directly from the global dictionary
-        new_db = user_sessions[user_id]
-        
-        # 4. Perform search using the in-memory database
         docs = new_db.similarity_search(user_question, k=5)
         
-        # Analyze question type for dynamic response formatting
-        question_types = analyze_question_type(user_question)  # ✅ plural
+        question_types = analyze_question_type(user_question)
+        persona_config = get_persona_configuration(persona, question_types)
+        system_prompt = build_dynamic_prompt(persona_config, question_types)
         
-        # Enhanced persona instructions with dynamic formatting
-        persona_config = get_persona_configuration(persona, question_types)  # ✅ FIX THIS
-        
-        # Build dynamic system prompt
-        system_prompt = build_dynamic_prompt(persona_config, question_types)  # ✅ FIX THIS
-        
-        # Create and execute chain
         prompt = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
         model = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
@@ -579,18 +628,14 @@ def user_ip(user_question, persona):
             return_only_outputs=True
         )
         
-        # Get additional info with persona context
-        additional_info = get_additional_info(user_question, persona, question_types)  # ✅ already correct
-        logging.info(f"Additional info generated: {bool(additional_info)}")
+        additional_info = get_additional_info(user_question, persona, question_types)
         
-        # Format response based on persona and question type
         formatted_response = format_response(
             response["output_text"], 
             persona, 
-            question_types  # ✅ already correct
+            question_types
         )
         
-        logging.info(f"Query successful - Response length: {len(formatted_response)}, Docs: {len(docs)}, Additional info: {bool(additional_info)}")
         return formatted_response, docs, additional_info
         
     except Exception as e:
@@ -1219,141 +1264,78 @@ def download_pdf_api():
 
 @app.route('/start_over', methods=['POST'])
 def start_over():
-    # 1. Identify the user before clearing the session
     user_id = session.get('user_id')
     
-    # 2. Clear RAM: Remove this user's data from the global memory
-    if user_id and user_id in user_sessions:
-        try:
-            del user_sessions[user_id]
-            logging.info(f"Cleared memory for user {user_id}")
-        except Exception as e:
-            logging.error(f"Error clearing memory for user {user_id}: {e}")
-    
-    # 3. Clear Browser Session (Cookies) - including URL flags
+    # Immediate Cleanup for this user
+    if user_id:
+        folder_path = os.path.join("faiss_indexes", user_id)
+        if os.path.exists(folder_path):
+            try:
+                shutil.rmtree(folder_path)
+            except Exception as e:
+                logging.error(f"Error removing user folder: {e}")
+
     session.clear()
-    
-    # 4. Clear Disk (Cleanup for any leftover files)
-    if os.path.exists("faiss_index"):
-        try:
-            shutil.rmtree("faiss_index")
-        except Exception as e:
-            logging.error(f"Error removing faiss_index directory: {e}")
-    
-    # Recreate user_id for new session
     session['user_id'] = str(uuid.uuid4())
     
-    return jsonify({'success': True, 'message': 'Session cleared successfully'})
-    
+    return jsonify({'success': True, 'message': 'Session cleared successfully'})    
 
 @app.route('/generate_questions', methods=['POST'])
 def generate_questions():
     try:
-        # 1. Get User ID from session
-        user_id = session.get('user_id')
+        new_db = load_user_vector_store()
         
-        # 2. Check RAM (user_sessions) instead of Disk
-        if not user_id or user_id not in user_sessions:
-            return jsonify({
-                'success': False,
-                'error': 'No documents have been uploaded yet'
-            }), 400
+        if not new_db:
+            return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        # 3. Load Vector Store from RAM
-        new_db = user_sessions[user_id]
-        
-        # 4. Perform Search (No changes to logic below)
-        docs = new_db.similarity_search("", k=3)  # Get representative documents
-        
+        docs = new_db.similarity_search("", k=3)
         questions = generate_common_questions(docs)
         session['generated_questions'] = questions
         
-        return jsonify({
-            'success': True,
-            'questions': questions
-        })
+        return jsonify({'success': True, 'questions': questions})
     except Exception as e:
         logging.error(f"Error generating questions: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/generate_concepts', methods=['POST'])
 def generate_concepts():
     try:
-        # 1. Get User ID from session
-        user_id = session.get('user_id')
+        new_db = load_user_vector_store()
         
-        # 2. Check RAM (user_sessions) instead of Disk
-        if not user_id or user_id not in user_sessions:
-            return jsonify({
-                'success': False,
-                'error': 'No documents have been uploaded yet'
-            }), 400
+        if not new_db:
+            return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        # 3. Load Vector Store from RAM
-        new_db = user_sessions[user_id]
-        
-        # 4. Perform Search
-        docs = new_db.similarity_search("", k=3)  # Get representative documents
-        
+        docs = new_db.similarity_search("", k=3)
         concepts = generate_key_concepts(docs)
         session['key_concepts'] = concepts
         
-        return jsonify({
-            'success': True,
-            'concepts': concepts
-        })
+        return jsonify({'success': True, 'concepts': concepts})
     except Exception as e:
         logging.error(f"Error generating concepts: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/get_additional_info', methods=['POST'])
 def get_additional_info_route():
     try:
-        # 1. Get User ID from session
-        user_id = session.get('user_id')
+        new_db = load_user_vector_store()
         
-        # 2. Check RAM (user_sessions) instead of Disk
-        if not user_id or user_id not in user_sessions:
-            return jsonify({
-                'success': False,
-                'error': 'No documents have been uploaded yet'
-            }), 400
+        if not new_db:
+            return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        # 3. Load Vector Store from RAM
-        new_db = user_sessions[user_id]
-        
-        # 4. Perform Search
-        docs = new_db.similarity_search("", k=5)  # Get representative documents
-        
-        # Get a summary of the document content
+        docs = new_db.similarity_search("", k=5)
         context = "\n".join(doc.page_content for doc in docs)
-        additional_info = get_additional_info(context, persona=None, question_types=None)
+        additional_info = get_additional_info(context)
         
         if additional_info:
-            return jsonify({
-                'success': True,
-                'additional_info': additional_info
-            })
+            return jsonify({'success': True, 'additional_info': additional_info})
         else:
-            return jsonify({
-                'success': False,
-                'error': 'Could not generate additional information'
-            }), 400
+            return jsonify({'success': False, 'error': 'Could not generate info'}), 400
             
     except Exception as e:
         logging.error(f"Error getting additional information: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
         
     
 # Replace the index route with this fixed version:
@@ -1368,7 +1350,7 @@ def android_query():
     persona = request.form.get('persona', 'Student')
     files = request.files.getlist('docs')
 
-    # Process uploaded files if present
+    # Handle Uploads
     if files and any(file.filename for file in files):
         all_text = ""
         for file in files:
@@ -1379,26 +1361,24 @@ def android_query():
 
         if all_text.strip():
             text_chunks = get_chunks(all_text)
+            # Calls get_vector_store which now triggers auto-cleanup
             success = get_vector_store(text_chunks)
             if not success:
                 return jsonify({
-                    "response": "Failed to create knowledge base from uploaded documents.",
+                    "response": "Failed to create knowledge base.",
                     "additional_info": None,
                     "recommendations": [],
                     "uploaded_filenames": uploaded_filenames
                 }), 500
-            # Set session flag for file upload
             session['has_documents'] = True
             session.modified = True
 
-    # *** CRITICAL FIX: Check if user has any documents (files OR URLs) ***
-    user_id = session.get('user_id')
-    #has_documents = session.get('has_documents', False) or session.get('urls_processed', False)
-    
+    # Handle Question
     if user_question:
-        # Verify documents exist before querying
-        if not user_id or user_id not in user_sessions:
-            return jsonify({
+        new_db = load_user_vector_store()
+        
+        if not new_db:
+             return jsonify({
                 "response": "Please upload documents or process URLs first.",
                 "additional_info": None,
                 "recommendations": [],
@@ -1421,6 +1401,7 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
 
