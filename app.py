@@ -1288,7 +1288,7 @@ def generate_questions():
         if not new_db:
             return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        docs = new_db.similarity_search("", k=3)
+        docs = new_db.similarity_search("important questions that can be asked from this document", k=3)
         questions = generate_common_questions(docs)
         session['generated_questions'] = questions
         
@@ -1306,7 +1306,7 @@ def generate_concepts():
         if not new_db:
             return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        docs = new_db.similarity_search("", k=3)
+        docs = new_db.similarity_search("main concepts and key ideas discussed in this document", k=3)
         concepts = generate_key_concepts(docs)
         session['key_concepts'] = concepts
         
@@ -1324,7 +1324,7 @@ def get_additional_info_route():
         if not new_db:
             return jsonify({'success': False, 'error': 'No documents uploaded'}), 400
 
-        docs = new_db.similarity_search("", k=5)
+        docs = new_db.similarity_search("background context, additional knowledge and supporting details from the document", k=3)
         context = "\n".join(doc.page_content for doc in docs)
         additional_info = get_additional_info(context)
         
@@ -1401,6 +1401,7 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
 
