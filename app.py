@@ -536,31 +536,6 @@ def get_qa_chain():
     model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY, temperature=0.3)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
-
-def get_additional_info(query):
-    """Get additional information from Gemini for the query"""
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Craft a prompt that encourages complementary information
-        enhanced_prompt = f"""
-        You are a helpful assistant. Based on the following content, provide additional relevant information in plain text with no markdown symbols, no bullet points, and no formatting characters like '*', '-', or '**'.
-        Topic:
-        {query}
-        Cover the following in plain text:
-        1. Recent developments or updates
-        2. Common practical applications
-        3. Related concepts or technologies
-        4. Expert insights or best practices
-        Write clearly and concisely in paragraph format.
-        """
-
-        
-        response = model.generate_content(enhanced_prompt)
-        return response.text
-    except Exception as e:
-        logging.error(f"Error getting additional information: {e}")
-        return None
     
     
 def user_ip(user_question, persona):
@@ -584,7 +559,7 @@ def user_ip(user_question, persona):
         docs = new_db.similarity_search(user_question, k=5)
         
         # Analyze question type for dynamic response formatting
-        question_type = analyze_question_type(user_question)
+        question_types = analyze_question_type(user_question)
         
         # Enhanced persona instructions with dynamic formatting
         persona_config = get_persona_configuration(persona, question_type)
@@ -607,13 +582,14 @@ def user_ip(user_question, persona):
         )
         
         # Get additional info with persona context
-        additional_info = get_additional_info(user_question, persona, question_type)
+        additional_info = get_additional_info(user_question, persona, question_types)
+        logging.info(f"Additional info generated: {bool(additional_info)}")
         
         # Format response based on persona and question type
         formatted_response = format_response(
             response["output_text"], 
             persona, 
-            question_type
+            question_types
         )
         
         return formatted_response, docs, additional_info
@@ -1360,7 +1336,7 @@ def get_additional_info_route():
         
         # Get a summary of the document content
         context = "\n".join(doc.page_content for doc in docs)
-        additional_info = get_additional_info(context)
+        additional_info = get_additional_info(context, persona=None, question_types=None)
         
         if additional_info:
             return jsonify({
@@ -1418,7 +1394,7 @@ def android_query():
 
     # *** CRITICAL FIX: Check if user has any documents (files OR URLs) ***
     user_id = session.get('user_id')
-    has_documents = session.get('has_documents', False) or session.get('urls_processed', False)
+    #has_documents = session.get('has_documents', False) or session.get('urls_processed', False)
     
     if user_question:
         # Verify documents exist before querying
@@ -1446,5 +1422,6 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
