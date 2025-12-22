@@ -537,7 +537,6 @@ def get_qa_chain():
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
     
-    
 def user_ip(user_question, persona):
     """
     Enhanced persona-aware query handler with dynamic response formatting
@@ -548,7 +547,6 @@ def user_ip(user_question, persona):
         user_id = session.get('user_id')
         
         # 2. Check if this user has data in memory (RAM)
-        # We NO LONGER check for a file on disk ("faiss_index")
         if not user_id or user_id not in user_sessions:
             return "Please upload documents or process URLs first.", [], None
 
@@ -559,13 +557,13 @@ def user_ip(user_question, persona):
         docs = new_db.similarity_search(user_question, k=5)
         
         # Analyze question type for dynamic response formatting
-        question_types = analyze_question_type(user_question)
+        question_types = analyze_question_type(user_question)  # ✅ plural
         
         # Enhanced persona instructions with dynamic formatting
-        persona_config = get_persona_configuration(persona, question_type)
+        persona_config = get_persona_configuration(persona, question_types)  # ✅ FIX THIS
         
         # Build dynamic system prompt
-        system_prompt = build_dynamic_prompt(persona_config, question_type)
+        system_prompt = build_dynamic_prompt(persona_config, question_types)  # ✅ FIX THIS
         
         # Create and execute chain
         prompt = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
@@ -582,20 +580,21 @@ def user_ip(user_question, persona):
         )
         
         # Get additional info with persona context
-        additional_info = get_additional_info(user_question, persona, question_types)
+        additional_info = get_additional_info(user_question, persona, question_types)  # ✅ already correct
         logging.info(f"Additional info generated: {bool(additional_info)}")
         
         # Format response based on persona and question type
         formatted_response = format_response(
             response["output_text"], 
             persona, 
-            question_types
+            question_types  # ✅ already correct
         )
         
+        logging.info(f"Query successful - Response length: {len(formatted_response)}, Docs: {len(docs)}, Additional info: {bool(additional_info)}")
         return formatted_response, docs, additional_info
         
     except Exception as e:
-        logging.error(f"Error in user_ip: {str(e)}")
+        logging.error(f"Error in user_ip: {str(e)}", exc_info=True)
         return f"Error: {str(e)}", [], None
         
 
@@ -1422,6 +1421,7 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
 
