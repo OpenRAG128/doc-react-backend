@@ -567,7 +567,7 @@ def get_vector_store(text_chunks):
             return False
 
         # 1. TRIGGER CLEANUP: Delete old files before creating new ones
-        cleanup_old_sessions()
+        #cleanup_old_sessions()
 
         embeddings = get_embeddings()
         vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
@@ -1401,6 +1401,7 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
 
