@@ -600,7 +600,13 @@ def get_qa_chain():
     model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY, temperature=0.3)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    
+
+def extract_topic_from_question(question):
+    # Strip interrogative framing
+    question = re.sub(r'^(how|what|why|is|are|can|does|do)\s+', '', question.lower())
+    question = question.rstrip(' ?.')
+    return question.strip()
+
 def user_ip(user_question, persona):
     try:
         # Load from Disk (this also updates the timestamp so data isn't deleted)
@@ -628,7 +634,8 @@ def user_ip(user_question, persona):
             return_only_outputs=True
         )
         
-        additional_info = get_additional_info(user_question, persona, question_types)
+        topic_anchor = extract_topic_from_question(user_question)
+        additional_info = get_additional_info(topic_anchor, persona, question_types)
         
         formatted_response = format_response(
             response["output_text"], 
@@ -946,17 +953,34 @@ Answer:
 """
     return prompt
 
+def strip_markdown(text):
+    # Remove markdown headings (###, ####, etc.)
+    text = re.sub(r'#{1,6}\s*', '', text)
+
+    # Remove bold and italics
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+
+    # Remove inline code and code blocks
+    text = re.sub(r'`{1,3}.*?`{1,3}', '', text, flags=re.DOTALL)
+
+    # Remove bullet points
+    text = re.sub(r'^\s*[-•]\s+', '', text, flags=re.MULTILINE)
+
+    # Remove numbered markdown-style headings (e.g., "1. Title")
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+
+    # Normalize excessive newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
 
 def format_response(response_text, persona, question_types):
     """
     Format and clean the response based on persona and question type.
     """
     # Remove markdown formatting
-    cleaned = response_text
-    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)  # Remove bold
-    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)      # Remove italic
-    cleaned = re.sub(r'^[-•]\s+', '', cleaned, flags=re.MULTILINE)  # Remove bullets
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)        # Remove excessive newlines
+    cleaned = strip_markdown(response_text)
     
     # Persona-specific formatting enhancements
     if persona == "Teacher":
@@ -1024,20 +1048,23 @@ def get_additional_info(query, persona=None, question_types=None):
             persona_context = persona_styles.get(persona, "")
         
         enhanced_prompt = f"""
-        Provide additional relevant information {persona_context} about the following topic.
-        
+        You are providing supplementary information for a user who has already received a complete main answer.
+        Your task is to add NEW value, not to repeat or rephrase the main explanation.
+        Focus on deeper context, broader implications, practical relevance, or adjacent knowledge that enriches understanding of the topic.
         Topic: {query}
         
-        Cover complementary aspects such as:
-        - Recent developments or trends
-        - Practical applications or use cases
-        - Related concepts or technologies
-        - Best practices or expert insights
+        Guidelines:
+        - Do NOT explain what the question is asking.
+        - Do NOT restate definitions or summaries likely covered in the main response.
+        - Assume the reader already understands the core concept.
+        - Add insights such as real-world relevance, implications, limitations, future directions, or expert perspectives.
+        - If appropriate, include concise examples or observations that extend understanding.
         
-        Write in clear, natural language paragraphs without markdown formatting, bullet points, 
-        or special characters. Focus on information that complements what might already be 
-        covered in the main response.
+        Write in clear, professional paragraphs using plain text only.
+        Do NOT use markdown, headings, bullet points, symbols, or special formatting.
+        Keep the tone informative, neutral, and value-adding.
         """
+
         
         response = model.generate_content(enhanced_prompt)
         return response.text.strip()
@@ -1049,12 +1076,16 @@ def get_additional_info(query, persona=None, question_types=None):
         
 def generate_common_questions(docs):
     try:
-        prompt = """you are an professional in generating good and applicable questions. Generate 5 questions according to the file and if the questions are not enough 
-        then generate questions relevant to the context.
-        
-        Document content: {context}
-        
-        Generate 7 important questions:"""
+        prompt = """
+        Generate EXACTLY 7 important, distinct questions.
+        Each question MUST be on its own line.
+        Format strictly as:
+        Q1: ...
+        Q2: ...
+        ...
+        Q7: ...
+        Do NOT include any introduction or explanation.
+        """
         
         chain = get_qa_chain()
         response = chain(
@@ -1063,7 +1094,7 @@ def generate_common_questions(docs):
         )
         
         # Extract questions from the response
-        questions = [q.strip() for q in response['output_text'].split('\n') if q.strip()]
+        questions = re.findall(r'Q\d+:\s*(.+)', response['output_text'])
         return questions[:7]  # Ensure we return max 5 questions
     except Exception as e:
         logging.error(f"Error generating questions: {e}")
@@ -1401,6 +1432,7 @@ def android_query():
 
 if __name__ == '__main__':
      app.run(debug=os.getenv("FLASK_DEBUG", False), threaded=True, host="0.0.0.0")
+
 
 
 
